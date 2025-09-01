@@ -7,7 +7,7 @@ const api = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 30000, // Increased timeout for AI processing
+  timeout: 45000, // Increased timeout for mxbai-embed-large processing
 });
 
 // Add response interceptor for error handling
@@ -38,6 +38,9 @@ export interface Leakage {
   confidence: number;
   category: string;
   department: string;
+  customer_impact: string;
+  sector_specific: string;
+  embedding_score: number;
   detected_at: string;
 }
 
@@ -52,10 +55,14 @@ export interface Ticket {
   root_cause: string;
   ai_suggestions: string[];
   resolution_method?: 'ai' | 'manual';
+  customer_impact: string;
+  estimated_timeline: string;
   created_at: string;
   resolved_at?: string;
   sector: string;
   amount: number;
+  category: string;
+  confidence: number;
 }
 
 export interface Stats {
@@ -67,9 +74,16 @@ export interface Stats {
   manual_resolutions: number;
   severity_distribution: Record<string, number>;
   sector_distribution: Record<string, number>;
+  category_distribution: Record<string, number>;
   revenue_impact_by_sector: Record<string, number>;
   avg_leakage_amount: number;
   total_revenue_impact: number;
+  recovered_revenue: number;
+  total_customers_analyzed: number;
+  avg_ai_confidence: number;
+  avg_embedding_score: number;
+  embedding_model: string;
+  vector_db: string;
 }
 
 export const authAPI = {
@@ -84,7 +98,12 @@ export const authAPI = {
 };
 
 export const datasetAPI = {
-  upload: async (filename: string, sector: string, uploadedBy: string, content?: string): Promise<{ success: boolean; dataset_id?: string; message?: string }> => {
+  upload: async (filename: string, sector: string, uploadedBy: string, content?: string): Promise<{ 
+    success: boolean; 
+    dataset_id?: string; 
+    message?: string; 
+    customer_count?: number; 
+  }> => {
     try {
       const response = await api.post('/datasets/upload', {
         filename,
@@ -98,12 +117,21 @@ export const datasetAPI = {
     }
   },
 
-  process: async (datasetId: string): Promise<{ success: boolean; leakages_detected?: number; leakages?: Leakage[]; chunks_processed?: number; message?: string }> => {
+  process: async (datasetId: string): Promise<{ 
+    success: boolean; 
+    leakages_detected?: number; 
+    leakages?: Leakage[]; 
+    chunks_processed?: number;
+    customers_analyzed?: number;
+    embedding_model?: string;
+    vector_db?: string;
+    message?: string; 
+  }> => {
     try {
       const response = await api.post(`/datasets/${datasetId}/process`);
       return response.data;
     } catch (error: any) {
-      return { success: false, message: error.response?.data?.message || 'AI processing failed' };
+      return { success: false, message: error.response?.data?.message || 'Enhanced AI processing failed' };
     }
   },
 };
@@ -119,7 +147,13 @@ export const leakageAPI = {
     }
   },
 
-  getDetails: async (leakageId: string): Promise<(Leakage & { assigned_department: string; assigned_to: string; filename: string }) | null> => {
+  getDetails: async (leakageId: string): Promise<(Leakage & { 
+    assigned_department: string; 
+    assigned_to: string; 
+    filename: string;
+    customer_count: number;
+    embedding_model: string;
+  }) | null> => {
     try {
       const response = await api.get(`/leakages/${leakageId}/details`);
       return response.data.leakage;
@@ -131,7 +165,15 @@ export const leakageAPI = {
 };
 
 export const ticketAPI = {
-  generate: async (leakageId: string): Promise<{ success: boolean; ticket_id?: string; assigned_to?: string; department?: string; message?: string }> => {
+  generate: async (leakageId: string): Promise<{ 
+    success: boolean; 
+    ticket_id?: string; 
+    assigned_to?: string; 
+    department?: string;
+    customer_impact?: string;
+    estimated_timeline?: string;
+    message?: string; 
+  }> => {
     try {
       const response = await api.post('/tickets/generate', { leakage_id: leakageId });
       return response.data;
@@ -150,7 +192,12 @@ export const ticketAPI = {
     }
   },
 
-  resolve: async (ticketId: string, method: 'ai' | 'manual', solutions?: string[]): Promise<{ success: boolean; message?: string; resolution_details?: string }> => {
+  resolve: async (ticketId: string, method: 'ai' | 'manual', solutions?: string[]): Promise<{ 
+    success: boolean; 
+    message?: string; 
+    resolution_details?: string;
+    customer_impact?: string; 
+  }> => {
     try {
       const response = await api.post(`/tickets/${ticketId}/resolve`, {
         method,
@@ -176,7 +223,14 @@ export const statsAPI = {
 };
 
 export const chatAPI = {
-  ask: async (question: string, userId: string): Promise<{ success: boolean; response?: string; chat_id?: string; message?: string }> => {
+  ask: async (question: string, userId: string): Promise<{ 
+    success: boolean; 
+    response?: string; 
+    chat_id?: string;
+    vector_results_count?: number;
+    embedding_model?: string;
+    message?: string; 
+  }> => {
     try {
       const response = await api.post('/chat', {
         question,
@@ -184,11 +238,18 @@ export const chatAPI = {
       });
       return response.data;
     } catch (error: any) {
-      return { success: false, message: error.response?.data?.message || 'RAG chatbot failed' };
+      return { success: false, message: error.response?.data?.message || 'Enhanced RAG chatbot failed' };
     }
   },
 
-  getHistory: async (userId: string): Promise<{ question: string; answer: string; timestamp: string }[]> => {
+  getHistory: async (userId: string): Promise<{ 
+    question: string; 
+    answer: string; 
+    vector_context: any[];
+    similarity_scores: number[];
+    embedding_model: string;
+    timestamp: string; 
+  }[]> => {
     try {
       const response = await api.get(`/chat/history?user_id=${userId}`);
       return response.data.history || [];
@@ -200,13 +261,48 @@ export const chatAPI = {
 };
 
 export const healthAPI = {
-  check: async (): Promise<{ status: string; ai_configured: boolean; vector_db: string; timestamp: string }> => {
+  check: async (): Promise<{ 
+    status: string; 
+    ai_configured: boolean; 
+    embedding_model: any;
+    embedding_status: boolean;
+    vector_db: any;
+    crew_ai_ready: boolean;
+    total_embeddings: number;
+    timestamp: string; 
+  }> => {
     try {
       const response = await api.get('/health');
       return response.data;
     } catch (error) {
       console.error('Health check failed:', error);
-      return { status: 'error', ai_configured: false, vector_db: 'unknown', timestamp: new Date().toISOString() };
+      return { 
+        status: 'error', 
+        ai_configured: false, 
+        embedding_model: { status: 'failed' },
+        embedding_status: false,
+        vector_db: { status: false }, 
+        crew_ai_ready: false,
+        total_embeddings: 0,
+        timestamp: new Date().toISOString() 
+      };
+    }
+  },
+};
+
+export const vectorAPI = {
+  search: async (query: string, k: number = 5): Promise<{
+    success: boolean;
+    results?: any[];
+    embedding_model?: string;
+    vector_db?: string;
+    message?: string;
+  }> => {
+    try {
+      const response = await api.post('/vector/search', { query, k });
+      return response.data;
+    } catch (error: any) {
+      return { success: false, message: error.response?.data?.message || 'Vector search failed' };
     }
   },
 };

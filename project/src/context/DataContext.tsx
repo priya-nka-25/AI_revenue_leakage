@@ -7,9 +7,24 @@ interface DataContextType {
   tickets: Ticket[];
   stats: Stats | null;
   isLoading: boolean;
-  uploadDataset: (filename: string, sector: string, content?: string) => Promise<{ success: boolean; dataset_id?: string }>;
-  processDataset: (datasetId: string) => Promise<{ success: boolean; leakages_detected?: number }>;
-  generateTicket: (leakageId: string) => Promise<{ success: boolean; ticket_id?: string; assigned_to?: string; department?: string }>;
+  uploadDataset: (filename: string, sector: string, content?: string) => Promise<{ 
+    success: boolean; 
+    dataset_id?: string; 
+    customer_count?: number; 
+  }>;
+  processDataset: (datasetId: string) => Promise<{ 
+    success: boolean; 
+    leakages_detected?: number;
+    customers_analyzed?: number;
+    embedding_model?: string;
+  }>;
+  generateTicket: (leakageId: string) => Promise<{ 
+    success: boolean; 
+    ticket_id?: string; 
+    assigned_to?: string; 
+    department?: string;
+    customer_impact?: string;
+  }>;
   resolveTicket: (ticketId: string, method: 'ai' | 'manual', solutions?: string[]) => Promise<boolean>;
   getTicketsByRole: (role: 'finance' | 'it') => Ticket[];
   refreshData: () => Promise<void>;
@@ -52,13 +67,21 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const uploadDataset = async (filename: string, sector: string, content?: string): Promise<{ success: boolean; dataset_id?: string }> => {
+  const uploadDataset = async (filename: string, sector: string, content?: string): Promise<{ 
+    success: boolean; 
+    dataset_id?: string; 
+    customer_count?: number; 
+  }> => {
     if (!user) return { success: false };
     
     setIsLoading(true);
     try {
       const result = await datasetAPI.upload(filename, sector, user.id, content);
-      return result;
+      return {
+        success: result.success,
+        dataset_id: result.dataset_id,
+        customer_count: result.customer_count
+      };
     } catch (error) {
       console.error('Upload failed:', error);
       return { success: false };
@@ -67,14 +90,24 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const processDataset = async (datasetId: string): Promise<{ success: boolean; leakages_detected?: number }> => {
+  const processDataset = async (datasetId: string): Promise<{ 
+    success: boolean; 
+    leakages_detected?: number;
+    customers_analyzed?: number;
+    embedding_model?: string;
+  }> => {
     setIsLoading(true);
     try {
       const result = await datasetAPI.process(datasetId);
       if (result.success) {
         await refreshData();
       }
-      return result;
+      return {
+        success: result.success,
+        leakages_detected: result.leakages_detected,
+        customers_analyzed: result.customers_analyzed,
+        embedding_model: result.embedding_model
+      };
     } catch (error) {
       console.error('Processing failed:', error);
       return { success: false };
@@ -83,13 +116,25 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const generateTicket = async (leakageId: string): Promise<{ success: boolean; ticket_id?: string; assigned_to?: string; department?: string }> => {
+  const generateTicket = async (leakageId: string): Promise<{ 
+    success: boolean; 
+    ticket_id?: string; 
+    assigned_to?: string; 
+    department?: string;
+    customer_impact?: string;
+  }> => {
     try {
       const result = await ticketAPI.generate(leakageId);
       if (result.success) {
         await refreshData();
       }
-      return result;
+      return {
+        success: result.success,
+        ticket_id: result.ticket_id,
+        assigned_to: result.assigned_to,
+        department: result.department,
+        customer_impact: result.customer_impact
+      };
     } catch (error) {
       console.error('Ticket generation failed:', error);
       return { success: false };
