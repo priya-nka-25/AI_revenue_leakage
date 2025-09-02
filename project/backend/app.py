@@ -14,16 +14,18 @@ from typing import List, Dict, Any, Optional
 import io
 import csv
 
-# AI Imports - Updated for mxbai-embed-large
-import openai
-import google.generativeai as genai
+# Ollama Integration
+import ollama
+import requests
 from crewai import Agent, Task, Crew, Process
+from langchain.llms import Ollama as LangChainOllama
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.schema import Document
+
+# Vector Database and Embeddings
 from sentence_transformers import SentenceTransformer
 import faiss
 import tiktoken
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.llms import OpenAI
-from langchain.schema import Document
 import pickle
 import threading
 import queue
@@ -39,70 +41,134 @@ CORS(app, origins=["http://localhost:5173", "http://127.0.0.1:5173"])
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# AI Configuration
-openai.api_key = os.getenv('OPENAI_API_KEY')
-genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
-VECTOR_DB_TYPE = os.getenv('VECTOR_DB_TYPE', 'faiss')
+# Ollama Configuration
+OLLAMA_HOST = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
+OLLAMA_LLM_MODEL = os.getenv('OLLAMA_LLM_MODEL', 'mistral:7b')
+OLLAMA_EMBEDDING_MODEL = os.getenv('OLLAMA_EMBEDDING_MODEL', 'nomic-embed-text')
+EMBEDDING_DIMENSION = 768  # nomic-embed-text dimension
 
-# Global embedding model - mxbai-embed-large
+# Global models
 EMBEDDING_MODEL = None
-EMBEDDING_DIMENSION = 1024  # mxbai-embed-large dimension
+LLM_MODEL = None
 
-def initialize_embedding_model():
-    """Initialize the mxbai-embed-large model"""
-    global EMBEDDING_MODEL
-    if EMBEDDING_MODEL is None:
-        try:
-            logger.info("Loading mxbai-embed-large embedding model...")
-            EMBEDDING_MODEL = SentenceTransformer('mixedbread-ai/mxbai-embed-large-v1')
-            logger.info("✅ mxbai-embed-large model loaded successfully!")
-        except Exception as e:
-            logger.error(f"Failed to load mxbai-embed-large: {e}")
-            # Fallback to a smaller model
-            EMBEDDING_MODEL = SentenceTransformer('all-MiniLM-L6-v2')
-            logger.warning("Using fallback embedding model: all-MiniLM-L6-v2")
-    return EMBEDDING_MODEL
+def check_ollama_status():
+    """Check if Ollama is running and models are available"""
+    try:
+        response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
+        if response.status_code == 200:
+            models = response.json().get('models', [])
+            model_names = [model['name'] for model in models]
+            logger.info(f"✅ Ollama connected. Available models: {model_names}")
+            return True, model_names
+        else:
+            logger.error(f"❌ Ollama API returned status {response.status_code}")
+            return False, []
+    except Exception as e:
+        logger.error(f"❌ Failed to connect to Ollama: {e}")
+        return False, []
 
-class OptimizedVectorDatabase:
-    """Optimized FAISS Vector Database with mxbai-embed-large"""
+def initialize_ollama_models():
+    """Initialize Ollama models for embeddings and LLM"""
+    global EMBEDDING_MODEL, LLM_MODEL
+    
+    # Check Ollama status
+    ollama_available, available_models = check_ollama_status()
+    if not ollama_available:
+        logger.error("❌ Ollama not available. Please start Ollama first.")
+        return False
+    
+    try:
+        # Initialize embedding model
+        logger.info(f"📊 Loading embedding model: {OLLAMA_EMBEDDING_MODEL}")
+        
+        # Check if embedding model exists, if not try to pull it
+        if OLLAMA_EMBEDDING_MODEL not in available_models:
+            logger.info(f"📥 Pulling embedding model: {OLLAMA_EMBEDDING_MODEL}")
+            ollama.pull(OLLAMA_EMBEDDING_MODEL)
+        
+        # Test embedding generation
+        test_response = ollama.embeddings(model=OLLAMA_EMBEDDING_MODEL, prompt="test")
+        if 'embedding' in test_response:
+            global EMBEDDING_DIMENSION
+            EMBEDDING_DIMENSION = len(test_response['embedding'])
+            logger.info(f"✅ Ollama embedding model loaded! Dimension: {EMBEDDING_DIMENSION}")
+            EMBEDDING_MODEL = OLLAMA_EMBEDDING_MODEL
+        else:
+            raise Exception("No embedding in response")
+        
+        # Initialize LLM model
+        logger.info(f"🤖 Loading LLM model: {OLLAMA_LLM_MODEL}")
+        
+        # Check if LLM model exists, if not try to pull it
+        if OLLAMA_LLM_MODEL not in available_models:
+            logger.info(f"📥 Pulling LLM model: {OLLAMA_LLM_MODEL}")
+            ollama.pull(OLLAMA_LLM_MODEL)
+        
+        # Initialize LangChain Ollama wrapper
+        LLM_MODEL = LangChainOllama(
+            model=OLLAMA_LLM_MODEL,
+            base_url=OLLAMA_HOST,
+            temperature=0.1
+        )
+        
+        # Test LLM
+        test_response = LLM_MODEL.invoke("Hello")
+        if test_response:
+            logger.info(f"✅ Ollama LLM model loaded successfully!")
+        else:
+            raise Exception("No response from LLM")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize Ollama models: {e}")
+        return False
+
+class OllamaVectorDatabase:
+    """FAISS Vector Database with Ollama Embeddings"""
     
     def __init__(self):
         self.dimension = EMBEDDING_DIMENSION
         self.index = None
         self.documents = []
         self.embeddings_cache = {}
-        self.embedding_model = initialize_embedding_model()
         
         # Initialize FAISS index
         try:
-            self.index = faiss.IndexFlatIP(self.dimension)  # Inner Product for better performance
+            self.index = faiss.IndexFlatIP(self.dimension)
             logger.info(f"✅ FAISS index initialized with dimension {self.dimension}")
         except Exception as e:
             logger.error(f"Failed to initialize FAISS index: {e}")
             self.index = None
     
     def generate_embeddings(self, texts: List[str]) -> np.ndarray:
-        """Generate embeddings using mxbai-embed-large"""
+        """Generate embeddings using Ollama"""
         try:
-            if self.embedding_model is None:
+            if not EMBEDDING_MODEL:
                 raise Exception("Embedding model not initialized")
             
-            logger.info(f"Generating embeddings for {len(texts)} texts using mxbai-embed-large...")
+            logger.info(f"Generating embeddings for {len(texts)} texts using {OLLAMA_EMBEDDING_MODEL}")
             
-            # Generate embeddings in batches for better performance
-            batch_size = 32
             all_embeddings = []
+            for text in texts:
+                try:
+                    response = ollama.embeddings(model=OLLAMA_EMBEDDING_MODEL, prompt=text)
+                    if 'embedding' in response:
+                        all_embeddings.append(response['embedding'])
+                    else:
+                        # Fallback to zero vector
+                        all_embeddings.append([0.0] * self.dimension)
+                except Exception as e:
+                    logger.warning(f"Failed to generate embedding for text: {e}")
+                    all_embeddings.append([0.0] * self.dimension)
             
-            for i in range(0, len(texts), batch_size):
-                batch_texts = texts[i:i + batch_size]
-                batch_embeddings = self.embedding_model.encode(
-                    batch_texts,
-                    normalize_embeddings=True,  # Normalize for better similarity search
-                    show_progress_bar=False
-                )
-                all_embeddings.append(batch_embeddings)
+            embeddings = np.array(all_embeddings, dtype=np.float32)
             
-            embeddings = np.vstack(all_embeddings)
+            # Normalize embeddings
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            norms[norms == 0] = 1  # Avoid division by zero
+            embeddings = embeddings / norms
+            
             logger.info(f"✅ Generated {embeddings.shape[0]} embeddings with shape {embeddings.shape}")
             return embeddings
             
@@ -112,13 +178,13 @@ class OptimizedVectorDatabase:
             return np.random.rand(len(texts), self.dimension).astype(np.float32)
     
     def chunk_and_embed_dataset(self, dataset_content: str, dataset_id: str, sector: str) -> List[Dict]:
-        """Intelligent chunking and embedding with mxbai-embed-large"""
-        logger.info(f"Starting dataset processing for {sector} sector...")
+        """Intelligent chunking and embedding with Ollama"""
+        logger.info(f"Starting dataset processing for {sector} sector with Ollama...")
         
         try:
             # Step 1: Smart Text Splitting
             text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=800,  # Optimized for mxbai-embed-large
+                chunk_size=800,
                 chunk_overlap=100,
                 separators=["\n\n", "\n", ".", ",", " "]
             )
@@ -129,13 +195,11 @@ class OptimizedVectorDatabase:
             
             logger.info(f"Created {len(chunks)} optimized chunks")
             
-            # Step 2: Generate embeddings with mxbai-embed-large
+            # Step 2: Generate embeddings with Ollama
             embeddings = self.generate_embeddings(chunks)
             
             # Step 3: Store in FAISS
             if self.index is not None and embeddings.shape[0] > 0:
-                # Normalize embeddings for cosine similarity
-                faiss.normalize_L2(embeddings)
                 self.index.add(embeddings)
                 
                 # Store document metadata
@@ -160,33 +224,27 @@ class OptimizedVectorDatabase:
     def preprocess_customer_data(self, content: str, sector: str) -> str:
         """Enhanced preprocessing for customer dataset"""
         try:
-            # Parse CSV-like content into structured format
             lines = content.strip().split('\n')
             if len(lines) < 2:
                 return content
             
-            # Extract headers and data
             headers = [h.strip() for h in lines[0].split(',') if h.strip()]
             
             processed_sections = []
             processed_sections.append(f"Dataset: {sector.upper()} Customer Analysis")
             processed_sections.append(f"Data Structure: {', '.join(headers)}")
             
-            # Process each customer record
             for i, line in enumerate(lines[1:], 1):
                 if line.strip():
                     values = [v.strip() for v in line.split(',')]
                     if len(values) >= len(headers):
-                        # Create structured customer profile
                         customer_profile = f"Customer {i}: "
                         for j, (header, value) in enumerate(zip(headers, values[:len(headers)])):
                             if value and value != '':
                                 customer_profile += f"{header}={value}, "
                         
-                        # Add sector-specific analysis context
                         customer_profile += f"sector={sector}, "
                         
-                        # Add business context based on sector
                         if sector == 'telecom':
                             customer_profile += "telecom_services=mobile_billing_data_usage, "
                         elif sector == 'healthcare':
@@ -205,7 +263,7 @@ class OptimizedVectorDatabase:
             return content
     
     def similarity_search(self, query: str, k: int = 5) -> List[Dict]:
-        """Advanced similarity search with mxbai-embed-large"""
+        """Advanced similarity search with Ollama embeddings"""
         try:
             if self.index is None or len(self.documents) == 0:
                 return []
@@ -213,17 +271,14 @@ class OptimizedVectorDatabase:
             # Generate query embedding
             query_embedding = self.generate_embeddings([query])[0]
             
-            # Normalize for cosine similarity
+            # Reshape and search in FAISS
             query_embedding = query_embedding.reshape(1, -1)
-            faiss.normalize_L2(query_embedding)
-            
-            # Search in FAISS
             scores, indices = self.index.search(query_embedding, min(k, len(self.documents)))
             
             # Return results with scores
             results = []
             for score, idx in zip(scores[0], indices[0]):
-                if idx < len(self.documents) and score > 0.1:  # Minimum similarity threshold
+                if idx < len(self.documents) and score > 0.1:
                     doc = self.documents[idx]
                     results.append({
                         "content": doc["content"],
@@ -242,14 +297,14 @@ class OptimizedVectorDatabase:
             logger.error(f"Similarity search failed: {e}")
             return []
 
-class EnhancedCrewAISystem:
-    """Enhanced Crew AI with customer-specific analysis"""
+class OllamaCrewAISystem:
+    """Enhanced Crew AI with Ollama local models"""
     
     def __init__(self):
-        if openai.api_key:
-            self.llm = OpenAI(temperature=0.1, openai_api_key=openai.api_key)
+        if LLM_MODEL:
+            self.llm = LLM_MODEL
         else:
-            logger.warning("OpenAI API key not found. Using fallback.")
+            logger.warning("Ollama LLM not initialized. Using fallback.")
             self.llm = None
         
         self.setup_customer_agents()
@@ -280,28 +335,6 @@ class EnhancedCrewAISystem:
             allow_delegation=False
         )
         
-        self.customer_lifecycle_agent = Agent(
-            role='Customer Lifecycle Analyst',
-            goal='Analyze customer journey and lifecycle patterns to identify churn-related revenue losses',
-            backstory="""You are a customer success analyst specializing in customer lifecycle 
-            management, churn prediction, and retention analytics. You identify revenue leakages 
-            related to customer acquisition, retention, and lifecycle value optimization.""",
-            llm=self.llm,
-            verbose=True,
-            allow_delegation=False
-        )
-        
-        self.fraud_detection_agent = Agent(
-            role='Revenue Fraud Detection Specialist', 
-            goal='Detect fraudulent activities and suspicious patterns that cause revenue losses',
-            backstory="""You are a fraud detection expert with expertise in identifying suspicious 
-            customer behavior, payment fraud, account abuse, and revenue manipulation. You use 
-            advanced pattern recognition to spot anomalous activities.""",
-            llm=self.llm,
-            verbose=True,
-            allow_delegation=False
-        )
-        
         self.revenue_optimization_agent = Agent(
             role='Revenue Optimization Expert',
             goal='Synthesize all findings and recommend revenue optimization strategies',
@@ -313,21 +346,19 @@ class EnhancedCrewAISystem:
             allow_delegation=False
         )
     
-    def analyze_customer_revenue_leakages(self, dataset_content: str, sector: str, vector_db: OptimizedVectorDatabase) -> List[Dict]:
-        """Enhanced customer-focused revenue leakage analysis"""
+    def analyze_customer_revenue_leakages(self, dataset_content: str, sector: str, vector_db: OllamaVectorDatabase) -> List[Dict]:
+        """Enhanced customer-focused revenue leakage analysis with Ollama"""
         
         if not self.llm:
             return self.fallback_customer_analysis(dataset_content, sector)
         
-        logger.info(f"Starting enhanced customer analysis for {sector} sector")
+        logger.info(f"Starting Ollama Crew AI analysis for {sector} sector")
         
         # Get relevant context from vector database
         customer_queries = [
             f"{sector} customer billing issues",
             f"{sector} payment processing errors", 
-            f"{sector} subscription management problems",
-            f"{sector} customer churn revenue impact",
-            f"{sector} pricing discrepancies"
+            f"{sector} subscription management problems"
         ]
         
         vector_context = []
@@ -336,15 +367,15 @@ class EnhancedCrewAISystem:
             for doc in similar_docs:
                 vector_context.append(doc["content"])
         
-        context_text = "\n".join(vector_context[:8])
+        context_text = "\n".join(vector_context[:5])
         
         # Enhanced task definitions for customer data
         customer_analysis_task = Task(
             description=f"""
             Analyze customer data patterns for revenue leakages in the {sector} sector:
             
-            Customer Dataset: {dataset_content[:2000]}
-            Vector Context: {context_text[:1000]}
+            Customer Dataset: {dataset_content[:1500]}
+            Vector Context: {context_text[:800]}
             
             Focus on these customer data fields:
             - customer_id: Unique customer identification
@@ -361,116 +392,40 @@ class EnhancedCrewAISystem:
             4. Activation date billing discrepancies
             5. Customer type-specific revenue leakages
             
-            Provide specific findings with customer IDs and estimated revenue impact.
+            Provide 3-5 specific findings with customer examples and revenue impact.
             """,
             agent=self.customer_analyst_agent,
             expected_output="Customer data revenue leakage analysis with specific customer examples"
         )
         
-        billing_analysis_task = Task(
-            description=f"""
-            Deep dive into billing system issues using customer data:
-            
-            Customer Dataset: {dataset_content[:2000]}
-            Sector: {sector}
-            
-            Examine:
-            1. Plan pricing vs customer type mismatches
-            2. Billing cycle inconsistencies from activation dates
-            3. Revenue recognition delays
-            4. Pricing tier migration errors
-            5. Payment processing failures
-            
-            For each issue, provide:
-            - Specific customer examples (customer_id)
-            - Exact revenue impact calculation
-            - Billing system component affected
-            - Recommended pricing corrections
-            """,
-            agent=self.billing_specialist_agent,
-            expected_output="Detailed billing system analysis with revenue corrections"
-        )
-        
-        lifecycle_analysis_task = Task(
-            description=f"""
-            Customer lifecycle revenue analysis:
-            
-            Dataset: {dataset_content[:2000]}
-            Sector: {sector}
-            
-            Analyze:
-            1. Account age vs plan type optimization opportunities
-            2. Customer type lifecycle value patterns  
-            3. Activation date cohort revenue trends
-            4. Plan upgrade/downgrade revenue impacts
-            5. Customer retention vs revenue correlation
-            
-            Identify:
-            - Undervalued customer segments
-            - Pricing optimization opportunities
-            - Lifecycle-based revenue recovery strategies
-            """,
-            agent=self.customer_lifecycle_agent,
-            expected_output="Customer lifecycle revenue optimization analysis"
-        )
-        
-        fraud_detection_task = Task(
-            description=f"""
-            Fraud and anomaly detection in customer data:
-            
-            Dataset: {dataset_content[:2000]}
-            Sector: {sector}
-            
-            Detect:
-            1. Suspicious customer type vs plan price combinations
-            2. Anomalous account age patterns
-            3. Unusual activation date clustering
-            4. Plan price manipulation indicators
-            5. Customer ID duplication or irregularities
-            
-            Flag suspicious patterns that indicate revenue fraud or data integrity issues.
-            """,
-            agent=self.fraud_detection_agent,
-            expected_output="Fraud detection analysis with flagged customer accounts"
-        )
-        
         optimization_synthesis_task = Task(
             description=f"""
-            Synthesize all customer analysis findings into actionable revenue optimization strategies:
+            Create actionable revenue optimization strategies from the customer analysis:
             
-            Inputs from all agents:
-            - Customer data patterns
-            - Billing system issues
-            - Lifecycle optimization opportunities
-            - Fraud detection results
+            Inputs from customer analysis and context data.
             
             Create:
             1. Prioritized list of revenue leakages with customer examples
             2. Department-specific action items (Finance/IT)
             3. Revenue recovery estimates
-            4. Implementation timeline recommendations
-            5. Monitoring and prevention strategies
+            4. Implementation recommendations
             
-            Format as structured JSON with customer_id references where applicable.
+            Format as structured analysis with customer_id references where applicable.
+            Focus on {sector} industry best practices.
             """,
             agent=self.revenue_optimization_agent,
             expected_output="Comprehensive revenue optimization strategy with customer-specific actions"
         )
         
-        # Create enhanced crew for customer analysis
+        # Create Ollama crew for customer analysis
         customer_crew = Crew(
             agents=[
                 self.customer_analyst_agent,
                 self.billing_specialist_agent,
-                self.customer_lifecycle_agent,
-                self.fraud_detection_agent,
                 self.revenue_optimization_agent
             ],
             tasks=[
                 customer_analysis_task,
-                billing_analysis_task,
-                lifecycle_analysis_task,
-                fraud_detection_task,
                 optimization_synthesis_task
             ],
             process=Process.sequential,
@@ -478,65 +433,66 @@ class EnhancedCrewAISystem:
         )
         
         try:
-            logger.info("🤖 Executing Enhanced Customer Crew AI Analysis...")
+            logger.info("🤖 Executing Ollama Customer Crew AI Analysis...")
             crew_result = customer_crew.kickoff()
-            logger.info("✅ Customer Crew AI analysis completed")
+            logger.info("✅ Ollama Customer Crew AI analysis completed")
             
-            return self.parse_customer_crew_results(crew_result, sector)
+            return self.parse_customer_crew_results(str(crew_result), sector)
             
         except Exception as e:
-            logger.error(f"Enhanced Crew AI execution failed: {e}")
+            logger.error(f"Ollama Crew AI execution failed: {e}")
             return self.fallback_customer_analysis(dataset_content, sector)
     
     def parse_customer_crew_results(self, crew_result: str, sector: str) -> List[Dict]:
-        """Parse customer-focused crew results"""
+        """Parse customer-focused crew results from Ollama"""
         
         try:
-            # Enhanced parsing for customer-specific results
-            structure_prompt = f"""
-            Parse the customer revenue analysis results and create structured leakages:
-            
-            Crew AI Analysis: {crew_result}
-            
-            Create realistic {sector} customer revenue leakages in JSON format:
-            [
-                {{
-                    "severity": "critical|high|medium|low",
-                    "cause": "specific customer data issue found",
-                    "root_cause": "detailed analysis with customer examples",
-                    "amount": realistic_revenue_impact_in_usd,
-                    "department": "finance|it",
-                    "confidence": 0.90,
-                    "category": "billing|customer_lifecycle|pricing|fraud|data_quality",
-                    "customer_impact": "number_of_customers_affected",
-                    "sector_specific": "telecom/healthcare/banking_context"
-                }}
-            ]
-            
-            Requirements:
-            - 4-7 realistic leakages based on customer data analysis
-            - Include customer_impact for each issue
-            - Amounts realistic for {sector} customer base
-            - Reference actual data patterns found
-            """
-            
-            if openai.api_key:
-                response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": structure_prompt}],
-                    temperature=0.1,
-                    max_tokens=2000
-                )
+            # Use Ollama to structure the results
+            if self.llm:
+                structure_prompt = f"""
+                Parse the customer revenue analysis results and create structured leakages.
                 
-                json_content = response.choices[0].message.content.strip()
-                if json_content.startswith('```json'):
-                    json_content = json_content[7:-3]
-                elif json_content.startswith('```'):
-                    json_content = json_content[3:-3]
+                Analysis Results: {crew_result[:1000]}
                 
-                parsed_leakages = json.loads(json_content)
+                Create 3-5 realistic {sector} customer revenue leakages in this exact JSON format:
+                [
+                    {{
+                        "severity": "critical",
+                        "cause": "specific customer data issue found",
+                        "root_cause": "detailed analysis with customer examples",
+                        "amount": 25000,
+                        "department": "finance",
+                        "confidence": 0.90,
+                        "category": "billing",
+                        "customer_impact": "15+ customers affected",
+                        "sector_specific": "{sector} context"
+                    }}
+                ]
+                
+                Requirements:
+                - Include customer_impact for each issue
+                - Amounts realistic for {sector} customer base
+                - Reference actual data patterns found
+                - Valid JSON format only
+                """
+                
+                try:
+                    response = self.llm.invoke(structure_prompt)
+                    
+                    # Try to extract JSON from response
+                    json_start = response.find('[')
+                    json_end = response.rfind(']') + 1
+                    
+                    if json_start != -1 and json_end > json_start:
+                        json_content = response[json_start:json_end]
+                        parsed_leakages = json.loads(json_content)
+                    else:
+                        parsed_leakages = self.generate_fallback_customer_leakages(sector)
+                        
+                except Exception as e:
+                    logger.error(f"Failed to parse Ollama response: {e}")
+                    parsed_leakages = self.generate_fallback_customer_leakages(sector)
             else:
-                # Fallback structured results
                 parsed_leakages = self.generate_fallback_customer_leakages(sector)
             
             # Convert to internal format
@@ -660,98 +616,38 @@ class EnhancedCrewAISystem:
         """Fallback analysis focused on customer data patterns"""
         
         try:
-            if openai.api_key:
-                logger.info("Using OpenAI fallback for customer analysis")
+            if self.llm:
+                logger.info("Using Ollama fallback for customer analysis")
                 
                 customer_prompt = f"""
                 Analyze this {sector} customer dataset for revenue leakages:
                 
-                Customer Data: {dataset_content[:1500]}
+                Customer Data: {dataset_content[:1000]}
                 
-                Focus on these customer data aspects:
+                Focus on customer data aspects:
                 - Customer segmentation (prepaid/postpaid/corporate)
                 - Plan pricing vs customer type alignment
                 - Account age patterns and lifecycle optimization
                 - Activation date billing consistency
-                - Cross-customer pricing fairness
                 
-                Return realistic {sector} customer revenue leakages as JSON:
-                [
-                    {{
-                        "severity": "critical|high|medium|low",
-                        "cause": "specific customer data issue",
-                        "root_cause": "detailed customer analysis with examples",
-                        "amount": realistic_customer_revenue_impact,
-                        "department": "finance|it",
-                        "confidence": 0.88,
-                        "category": "billing|customer_lifecycle|pricing|data_quality",
-                        "customer_impact": "number_affected",
-                        "sector_specific": "{sector}_context"
-                    }}
-                ]
+                Identify 3-4 specific revenue leakage issues with customer examples.
                 """
                 
-                response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": customer_prompt}],
-                    temperature=0.2,
-                    max_tokens=1500
-                )
-                
-                json_content = response.choices[0].message.content.strip()
-                if json_content.startswith('```json'):
-                    json_content = json_content[7:-3]
-                elif json_content.startswith('```'):
-                    json_content = json_content[3:-3]
-                
-                leakages_data = json.loads(json_content)
-            else:
-                leakages_data = self.generate_fallback_customer_leakages(sector)
+                response = self.llm.invoke(customer_prompt)
+                logger.info(f"Ollama analysis: {response[:200]}...")
             
-            leakages = []
-            for item in leakages_data:
-                leakage = {
-                    'id': str(uuid.uuid4()),
-                    'sector': sector,
-                    'severity': item.get('severity', 'medium'),
-                    'cause': item.get('cause', f'{sector} customer billing issue'),
-                    'root_cause': item.get('root_cause', 'Customer data analysis required'),
-                    'amount': float(item.get('amount', 20000)),
-                    'status': 'detected',
-                    'confidence': float(item.get('confidence', 0.80)),
-                    'category': item.get('category', 'billing'),
-                    'department': item.get('department', 'finance'),
-                    'customer_impact': item.get('customer_impact', 'Multiple customers'),
-                    'sector_specific': item.get('sector_specific', f'{sector} specific')
-                }
-                leakages.append(leakage)
-            
-            return leakages
+            return self.generate_fallback_customer_leakages(sector)
             
         except Exception as e:
             logger.error(f"Customer fallback analysis failed: {e}")
-            # Return minimal customer-focused demo data
-            return [{
-                'id': str(uuid.uuid4()),
-                'sector': sector,
-                'severity': 'high',
-                'cause': f'{sector} customer billing system revenue leakage',
-                'root_cause': f'Customer data analysis shows billing discrepancies affecting multiple {sector} customers',
-                'amount': 25000,
-                'status': 'detected',
-                'confidence': 0.75,
-                'category': 'billing',
-                'department': 'finance',
-                'customer_impact': '10+ customers',
-                'sector_specific': f'{sector} customer billing optimization needed'
-            }]
+            return self.generate_fallback_customer_leakages(sector)
 
-class EnhancedRAGChatbot:
-    """Enhanced RAG with mxbai-embed-large and customer context"""
+class OllamaRAGChatbot:
+    """Enhanced RAG with Ollama and customer context"""
     
-    def __init__(self, vector_db: OptimizedVectorDatabase):
+    def __init__(self, vector_db: OllamaVectorDatabase):
         self.vector_db = vector_db
-        self.llm = OpenAI(temperature=0.3, openai_api_key=openai.api_key) if openai.api_key else None
+        self.llm = LLM_MODEL
     
     def get_enhanced_system_context(self) -> Dict[str, Any]:
         """Get comprehensive system context including customer insights"""
@@ -825,9 +721,6 @@ class EnhancedRAGChatbot:
             cursor.execute('SELECT sector, COUNT(*) FROM leakages GROUP BY sector')
             sector_breakdown = dict(cursor.fetchall())
             
-            cursor.execute('SELECT category, COUNT(*) FROM leakages GROUP BY category')
-            category_breakdown = dict(cursor.fetchall())
-            
             cursor.execute('SELECT SUM(amount) FROM leakages WHERE status = "detected"')
             pending_revenue_loss = cursor.fetchone()[0] or 0
             
@@ -840,7 +733,6 @@ class EnhancedRAGChatbot:
                     'resolved_tickets': resolved_tickets,
                     'ai_resolutions': ai_resolutions,
                     'sector_breakdown': sector_breakdown,
-                    'category_breakdown': category_breakdown,
                     'pending_revenue_loss': pending_revenue_loss
                 }
             }
@@ -852,10 +744,10 @@ class EnhancedRAGChatbot:
             conn.close()
     
     def answer_question(self, question: str) -> str:
-        """Enhanced RAG response with customer context"""
+        """Enhanced RAG response with Ollama and customer context"""
         
         if not self.llm:
-            return "🤖 RAG AI Assistant is in limited mode. Please configure OpenAI API key for full features."
+            return "🤖 RAG AI Assistant is in limited mode. Please start Ollama and configure models."
         
         try:
             # Enhanced vector search with multiple queries
@@ -868,7 +760,7 @@ class EnhancedRAGChatbot:
             
             all_vector_results = []
             for query in search_queries:
-                results = self.vector_db.similarity_search(query, k=3)
+                results = self.vector_db.similarity_search(query, k=2)
                 all_vector_results.extend(results)
             
             # Deduplicate and get top results
@@ -879,23 +771,23 @@ class EnhancedRAGChatbot:
                     unique_results.append(result)
                     seen_content.add(result["content"])
             
-            vector_context = unique_results[:6]
+            vector_context = unique_results[:4]
             
             # Get enhanced system context
             system_context = self.get_enhanced_system_context()
             
             # Create enhanced RAG prompt
             enhanced_rag_prompt = f"""
-            You are an advanced AI assistant for a Customer Revenue Leakage Detection System. 
-            Answer using the vector database context and current system data.
+            You are an AI assistant for a Customer Revenue Leakage Detection System using Ollama. 
+            Answer the user question using the context provided.
             
             User Question: {question}
             
-            Vector Database Context (mxbai-embed-large embeddings):
-            {json.dumps([{"content": r["content"][:200], "score": r["score"], "sector": r["metadata"]["sector"]} for r in vector_context], indent=2)}
+            Vector Database Context (Ollama embeddings):
+            {json.dumps([{"content": r["content"][:150], "score": r["score"], "sector": r["metadata"]["sector"]} for r in vector_context], indent=2)}
             
             Current System State:
-            📊 Datasets Processed: {len(system_context['datasets'])} (with mxbai embeddings)
+            📊 Datasets Processed: {len(system_context['datasets'])} (with Ollama embeddings)
             🚨 Active Leakages: {len(system_context['leakages'])} detected by AI
             🎫 Total Tickets: {len(system_context['tickets'])} generated
             📈 System Stats:
@@ -905,42 +797,27 @@ class EnhancedRAGChatbot:
             - Pending Revenue Loss: ${system_context['stats'].get('pending_revenue_loss', 0):,.2f}
             
             📋 Sector Breakdown: {system_context['stats'].get('sector_breakdown', {})}
-            📂 Category Breakdown: {system_context['stats'].get('category_breakdown', {})}
             
             Recent Customer-Focused Leakages:
-            {json.dumps(system_context['leakages'][:5], indent=2)}
+            {json.dumps(system_context['leakages'][:3], indent=2)}
             
-            Recent Tickets with Resolution Context:
-            {json.dumps(system_context['tickets'][:5], indent=2)}
+            Recent Tickets:
+            {json.dumps(system_context['tickets'][:3], indent=2)}
             
-            Instructions:
-            1. Provide customer-focused insights based on the data
-            2. Use specific metrics from the system when available
-            3. Reference vector search results for context
-            4. Include customer impact analysis when relevant
-            5. Format with emojis and markdown for readability
-            6. Focus on actionable insights for revenue optimization
-            
-            Answer comprehensively:
+            Provide a helpful response with specific metrics and customer insights. Use emojis and be concise.
             """
             
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": enhanced_rag_prompt}],
-                temperature=0.3,
-                max_tokens=1000
-            )
-            
-            return response.choices[0].message.content
+            response = self.llm.invoke(enhanced_rag_prompt)
+            return response
             
         except Exception as e:
             logger.error(f"Enhanced RAG error: {e}")
-            return f"🤖 I'm experiencing technical difficulties with the vector database. Please ensure:\n\n• mxbai-embed-large model is properly loaded\n• FAISS index is initialized\n• OpenAI API key is configured\n\nError details: {str(e)}"
+            return f"🤖 I'm experiencing technical difficulties with Ollama. Please ensure:\n\n• Ollama is running (`ollama serve`)\n• Required models are installed\n• FAISS vector database is initialized\n\nError: {str(e)}"
 
-# Initialize enhanced AI components
-vector_db = OptimizedVectorDatabase()
-crew_ai_system = EnhancedCrewAISystem()
-rag_chatbot = EnhancedRAGChatbot(vector_db)
+# Initialize Ollama AI components
+vector_db = OllamaVectorDatabase()
+crew_ai_system = OllamaCrewAISystem()
+rag_chatbot = OllamaRAGChatbot(vector_db)
 
 def init_enhanced_db():
     """Initialize enhanced database with customer-specific fields"""
@@ -970,7 +847,7 @@ def init_enhanced_db():
             content TEXT,
             embeddings_stored BOOLEAN DEFAULT FALSE,
             chunks_count INTEGER DEFAULT 0,
-            embedding_model TEXT DEFAULT 'mxbai-embed-large',
+            embedding_model TEXT DEFAULT 'ollama-nomic-embed',
             vector_db_type TEXT DEFAULT 'faiss',
             customer_count INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1032,7 +909,7 @@ def init_enhanced_db():
             answer TEXT NOT NULL,
             vector_context TEXT,
             similarity_scores TEXT,
-            embedding_model TEXT DEFAULT 'mxbai-embed-large',
+            embedding_model TEXT DEFAULT 'ollama-nomic-embed',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users (id)
         )
@@ -1115,7 +992,7 @@ def upload_dataset():
     
     cursor.execute('''
         INSERT INTO datasets (id, filename, sector, uploaded_by, status, content, customer_count, embedding_model, vector_db_type)
-        VALUES (?, ?, ?, ?, 'uploaded', ?, ?, 'mxbai-embed-large', 'faiss')
+        VALUES (?, ?, ?, ?, 'uploaded', ?, ?, 'ollama-nomic-embed', 'faiss')
     ''', (dataset_id, filename, sector, uploaded_by, content, customer_count))
     
     conn.commit()
@@ -1134,7 +1011,7 @@ def upload_dataset():
 
 @app.route('/api/datasets/<dataset_id>/process', methods=['POST'])
 def process_customer_dataset(dataset_id):
-    """Enhanced AI Pipeline: mxbai-embed-large → FAISS → Customer-focused Crew AI"""
+    """Enhanced AI Pipeline: Ollama Embeddings → FAISS → Customer-focused Crew AI"""
     
     conn = sqlite3.connect('revenue_system.db')
     cursor = conn.cursor()
@@ -1149,19 +1026,19 @@ def process_customer_dataset(dataset_id):
     filename, sector, content, uploaded_by, customer_count = dataset
     
     try:
-        logger.info(f"🤖 Starting Enhanced Customer AI Pipeline for {sector} dataset: {filename}")
-        logger.info(f"📊 Processing {customer_count} customer records with mxbai-embed-large")
+        logger.info(f"🤖 Starting Ollama Customer AI Pipeline for {sector} dataset: {filename}")
+        logger.info(f"📊 Processing {customer_count} customer records with Ollama")
         
-        # Step 1: Enhanced Chunking and Embedding with mxbai-embed-large
-        logger.info("📊 Step 1: Customer data chunking and mxbai-embed-large embedding generation...")
+        # Step 1: Enhanced Chunking and Embedding with Ollama
+        logger.info("📊 Step 1: Customer data chunking and Ollama embedding generation...")
         chunks_info = vector_db.chunk_and_embed_dataset(content, dataset_id, sector)
         
         # Step 2: Enhanced Customer-Focused Crew AI Analysis
-        logger.info("🤖 Step 2: Executing Enhanced Customer Crew AI analysis...")
+        logger.info("🤖 Step 2: Executing Ollama Customer Crew AI analysis...")
         detected_leakages = crew_ai_system.analyze_customer_revenue_leakages(content, sector, vector_db)
         
         # Step 3: Store Enhanced Results
-        logger.info("💾 Step 3: Storing enhanced AI analysis results...")
+        logger.info("💾 Step 3: Storing Ollama AI analysis results...")
         for leakage in detected_leakages:
             cursor.execute('''
                 INSERT INTO leakages (id, dataset_id, sector, severity, cause, root_cause, 
@@ -1187,7 +1064,7 @@ def process_customer_dataset(dataset_id):
         conn.commit()
         conn.close()
         
-        logger.info(f"✅ Enhanced Customer AI Pipeline Complete: {len(detected_leakages)} leakages detected")
+        logger.info(f"✅ Ollama Customer AI Pipeline Complete: {len(detected_leakages)} leakages detected")
         
         return jsonify({
             'success': True,
@@ -1195,19 +1072,19 @@ def process_customer_dataset(dataset_id):
             'leakages': detected_leakages,
             'chunks_processed': len(chunks_info),
             'customers_analyzed': customer_count,
-            'embedding_model': 'mxbai-embed-large',
+            'embedding_model': OLLAMA_EMBEDDING_MODEL,
             'vector_db': 'faiss',
-            'message': f'✅ Customer AI analysis complete! {len(detected_leakages)} revenue leakages detected using mxbai-embed-large + FAISS + Enhanced Crew AI. Analyzed {customer_count} customer records.'
+            'message': f'✅ Ollama Customer AI analysis complete! {len(detected_leakages)} revenue leakages detected using {OLLAMA_EMBEDDING_MODEL} + FAISS + Ollama Crew AI. Analyzed {customer_count} customer records.'
         })
         
     except Exception as e:
-        logger.error(f"Enhanced AI Processing Error: {e}")
+        logger.error(f"Ollama AI Processing Error: {e}")
         conn.rollback()
         conn.close()
         
         return jsonify({
             'success': False,
-            'message': f'Enhanced AI processing failed: {str(e)}. Please check mxbai-embed-large model and FAISS configuration.'
+            'message': f'Ollama AI processing failed: {str(e)}. Please check Ollama server and models.'
         }), 500
 
 # Enhanced Leakage Management API
@@ -1306,7 +1183,7 @@ def get_enhanced_leakage_details(leakage_id):
 # Enhanced Ticket Management API
 @app.route('/api/tickets/generate', methods=['POST'])
 def generate_enhanced_ticket():
-    """Generate customer-focused ticket with AI insights"""
+    """Generate customer-focused ticket with Ollama AI insights"""
     data = request.get_json()
     leakage_id = data.get('leakage_id')
     
@@ -1330,55 +1207,53 @@ def generate_enhanced_ticket():
     (sector, severity, cause, root_cause, amount, department, confidence, 
      category, customer_impact, sector_specific) = leakage
     
-    # Enhanced AI-generated resolution suggestions
+    # Enhanced Ollama AI-generated resolution suggestions
     try:
-        if openai.api_key:
+        if LLM_MODEL:
             enhanced_suggestions_prompt = f"""
-            Generate customer-focused resolution suggestions for this revenue leakage:
+            Generate 4-5 customer-focused resolution suggestions for this revenue leakage:
             
             Sector: {sector}
             Customer Impact: {customer_impact}
             Issue Category: {category}
-            Specific Context: {sector_specific}
             Issue: {cause}
             Root Cause: {root_cause}
             Revenue Impact: ${amount}
             Severity: {severity}
-            Department: {department}
-            AI Confidence: {confidence}
             
-            Create 5-6 specific, actionable solutions that address:
+            Create specific, actionable solutions that address:
             1. Immediate customer impact mitigation
             2. Billing system corrections
             3. Customer communication strategy
             4. Revenue recovery procedures
-            5. Prevention measures for similar customers
-            6. Monitoring and validation steps
+            5. Prevention measures
             
-            Return as JSON array with customer-focused action items for {department} team.
-            Focus on {sector} industry best practices.
+            Return as a simple list format for {department} team.
             """
             
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": enhanced_suggestions_prompt}],
-                temperature=0.2,
-                max_tokens=1000
-            )
+            response = LLM_MODEL.invoke(enhanced_suggestions_prompt)
             
-            ai_suggestions = json.loads(response.choices[0].message.content)
+            # Parse the response into a list
+            suggestions_lines = [line.strip() for line in response.split('\n') if line.strip() and not line.strip().startswith('#')]
+            ai_suggestions = suggestions_lines[:6]  # Take first 6 suggestions
+            
+            if not ai_suggestions:
+                ai_suggestions = [
+                    f"Investigate {sector} customer billing discrepancies affecting {customer_impact}",
+                    f"Review {category} system configuration for {sector} customers",
+                    f"Implement customer communication plan for affected accounts",
+                    f"Correct billing calculations for similar customer profiles"
+                ]
         else:
             ai_suggestions = [
                 f"Investigate {sector} customer billing discrepancies affecting {customer_impact}",
                 f"Review {category} system configuration for {sector} customers",
                 f"Implement customer communication plan for affected accounts",
-                f"Correct billing calculations for similar customer profiles",
-                f"Establish monitoring for {severity} severity issues in {sector}",
-                f"Update customer service procedures for {sector_specific} cases"
+                f"Correct billing calculations for similar customer profiles"
             ]
             
     except Exception as e:
-        logger.error(f"Enhanced AI suggestion generation failed: {e}")
+        logger.error(f"Ollama AI suggestion generation failed: {e}")
         ai_suggestions = [
             f"Investigate {sector} customer billing system for {customer_impact}",
             f"Review {category} configuration and customer impact",
@@ -1399,13 +1274,13 @@ def generate_enhanced_ticket():
     📊 Category: {category}
     🎯 Sector Context: {sector_specific}
     💰 Revenue Impact: ${amount:,.2f}
-    🤖 AI Confidence: {confidence*100:.1f}%
+    🤖 Ollama AI Confidence: {confidence*100:.1f}%
     
     Issue Details: {cause}
     
     Root Cause Analysis: {root_cause}
     
-    This ticket has been generated with AI-powered analysis and includes customer-specific resolution suggestions.
+    This ticket has been generated with Ollama AI-powered analysis and includes customer-specific resolution suggestions.
     """
     
     # Estimate timeline based on severity and customer impact
@@ -1436,7 +1311,7 @@ def generate_enhanced_ticket():
     
     department_name = 'Finance Team' if department == 'finance' else 'IT Support Team'
     
-    logger.info(f"✅ Enhanced ticket {ticket_id} generated for {department_name} - Customer Impact: {customer_impact}")
+    logger.info(f"✅ Ollama ticket {ticket_id} generated for {department_name} - Customer Impact: {customer_impact}")
     
     return jsonify({
         'success': True,
@@ -1445,7 +1320,7 @@ def generate_enhanced_ticket():
         'department': department_name,
         'customer_impact': customer_impact,
         'estimated_timeline': estimated_timeline,
-        'message': f'Enhanced ticket {ticket_id} generated with customer context and assigned to {department_name}'
+        'message': f'Ollama ticket {ticket_id} generated with customer context and assigned to {department_name}'
     })
 
 @app.route('/api/tickets', methods=['GET'])
@@ -1523,7 +1398,7 @@ def get_enhanced_tickets():
 
 @app.route('/api/tickets/<ticket_id>/resolve', methods=['POST'])
 def resolve_enhanced_ticket(ticket_id):
-    """Enhanced ticket resolution with customer context"""
+    """Enhanced ticket resolution with Ollama customer context"""
     data = request.get_json()
     method = data.get('method')
     custom_solutions = data.get('solutions', [])
@@ -1551,15 +1426,13 @@ def resolve_enhanced_ticket(ticket_id):
      sector, category, amount) = ticket_data
     
     if method == 'ai':
-        # Enhanced AI resolution with customer context
+        # Enhanced Ollama AI resolution
         try:
-            if openai.api_key:
+            if LLM_MODEL:
                 enhanced_ai_prompt = f"""
                 Generate a comprehensive customer-focused resolution plan:
                 
                 Ticket: {title}
-                Description: {description}
-                Root Cause: {root_cause}
                 Priority: {priority}
                 Customer Impact: {customer_impact}
                 Sector: {sector}
@@ -1568,22 +1441,17 @@ def resolve_enhanced_ticket(ticket_id):
                 
                 Create a detailed resolution plan with:
                 
-                🚨 IMMEDIATE ACTIONS (0-24 hours):
+                IMMEDIATE ACTIONS (0-24 hours):
                 1. Customer impact assessment and communication
                 2. Revenue loss mitigation steps
                 3. System/billing corrections
                 
-                📋 SHORT-TERM FIXES (1-7 days):
+                SHORT-TERM FIXES (1-7 days):
                 1. Customer account corrections
                 2. Billing system updates
                 3. Process improvements
                 
-                🔧 LONG-TERM PREVENTION (1-30 days):
-                1. System monitoring implementation
-                2. Customer lifecycle improvements
-                3. Revenue protection measures
-                
-                📊 VALIDATION & MONITORING:
+                VALIDATION & MONITORING:
                 1. Customer satisfaction verification
                 2. Revenue recovery tracking
                 3. Similar issue prevention
@@ -1591,17 +1459,11 @@ def resolve_enhanced_ticket(ticket_id):
                 Focus on {sector} industry best practices and customer retention.
                 """
                 
-                response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": enhanced_ai_prompt}],
-                    temperature=0.2,
-                    max_tokens=1200
-                )
-                
-                resolution_details = response.choices[0].message.content
+                response = LLM_MODEL.invoke(enhanced_ai_prompt)
+                resolution_details = response
             else:
                 resolution_details = f"""
-                ✅ AI Resolution Completed for {title}
+                ✅ Ollama AI Resolution Completed for {title}
                 
                 🚨 IMMEDIATE ACTIONS:
                 - Investigated {customer_impact} affected customers
@@ -1620,7 +1482,7 @@ def resolve_enhanced_ticket(ticket_id):
                 """
                 
         except Exception as e:
-            logger.error(f"Enhanced AI resolution failed: {e}")
+            logger.error(f"Ollama AI resolution failed: {e}")
             resolution_details = f"✅ AI resolution completed for {title} affecting {customer_impact}. Standard {sector} procedures applied."
     else:
         # Enhanced manual resolution
@@ -1653,11 +1515,11 @@ def resolve_enhanced_ticket(ticket_id):
     conn.commit()
     conn.close()
     
-    logger.info(f"✅ Enhanced ticket {ticket_id} resolved using {method} method - Customer Impact: {customer_impact}")
+    logger.info(f"✅ Ollama ticket {ticket_id} resolved using {method} method - Customer Impact: {customer_impact}")
     
     return jsonify({
         'success': True,
-        'message': f'Ticket {ticket_id} resolved successfully using {method} method with customer-focused approach',
+        'message': f'Ticket {ticket_id} resolved successfully using Ollama {method} method with customer-focused approach',
         'resolution_details': resolution_details,
         'customer_impact': customer_impact
     })
@@ -1741,7 +1603,7 @@ def get_enhanced_stats():
             'total_customers_analyzed': total_customers_analyzed,
             'avg_ai_confidence': round(avg_ai_confidence, 3),
             'avg_embedding_score': round(avg_embedding_score, 3),
-            'embedding_model': 'mxbai-embed-large',
+            'embedding_model': OLLAMA_EMBEDDING_MODEL,
             'vector_db': 'faiss'
         })
         
@@ -1753,7 +1615,7 @@ def get_enhanced_stats():
 # Enhanced RAG Chatbot API
 @app.route('/api/chat', methods=['POST'])
 def enhanced_chat_endpoint():
-    """Enhanced RAG Chatbot with mxbai-embed-large and customer context"""
+    """Enhanced RAG Chatbot with Ollama and customer context"""
     data = request.get_json()
     question = data.get('question', '').strip()
     user_id = data.get('user_id', 'admin-001')
@@ -1783,27 +1645,27 @@ def enhanced_chat_endpoint():
         cursor.execute('''
             INSERT INTO chat_history (id, user_id, question, answer, vector_context, 
                                     similarity_scores, embedding_model)
-            VALUES (?, ?, ?, ?, ?, ?, 'mxbai-embed-large')
-        ''', (chat_id, user_id, question, response, vector_context, similarity_scores))
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (chat_id, user_id, question, response, vector_context, similarity_scores, OLLAMA_EMBEDDING_MODEL))
         
         conn.commit()
         conn.close()
         
-        logger.info(f"✅ Enhanced RAG response generated for: {question[:50]}... (Vector results: {len(vector_results)})")
+        logger.info(f"✅ Ollama RAG response generated for: {question[:50]}... (Vector results: {len(vector_results)})")
         
         return jsonify({
             'success': True,
             'response': response,
             'chat_id': chat_id,
             'vector_results_count': len(vector_results),
-            'embedding_model': 'mxbai-embed-large'
+            'embedding_model': OLLAMA_EMBEDDING_MODEL
         })
         
     except Exception as e:
-        logger.error(f"Enhanced chat error: {e}")
+        logger.error(f"Ollama chat error: {e}")
         return jsonify({
             'success': False,
-            'message': '🤖 Enhanced RAG chatbot temporarily unavailable. Please check mxbai-embed-large model and FAISS configuration.',
+            'message': '🤖 Ollama RAG chatbot temporarily unavailable. Please check Ollama server and models.',
             'error': str(e)
         }), 500
 
@@ -1847,26 +1709,26 @@ def get_enhanced_chat_history():
 # Enhanced health check
 @app.route('/api/health', methods=['GET'])
 def enhanced_health_check():
-    """Enhanced system health check"""
+    """Enhanced system health check for Ollama"""
+    
+    # Check Ollama status
+    ollama_available, available_models = check_ollama_status()
     
     # Check embedding model status
-    embedding_status = False
-    embedding_info = {}
-    try:
-        model = initialize_embedding_model()
-        if model is not None:
-            embedding_status = True
-            embedding_info = {
-                'model_name': 'mxbai-embed-large',
-                'dimension': EMBEDDING_DIMENSION,
-                'status': 'loaded'
-            }
-    except Exception as e:
-        embedding_info = {
-            'model_name': 'mxbai-embed-large',
-            'dimension': EMBEDDING_DIMENSION,
-            'status': f'failed: {str(e)}'
-        }
+    embedding_status = EMBEDDING_MODEL is not None
+    embedding_info = {
+        'model_name': OLLAMA_EMBEDDING_MODEL,
+        'dimension': EMBEDDING_DIMENSION,
+        'status': 'loaded' if embedding_status else 'not_loaded',
+        'available_models': available_models
+    }
+    
+    # Check LLM status
+    llm_status = LLM_MODEL is not None
+    llm_info = {
+        'model_name': OLLAMA_LLM_MODEL,
+        'status': 'loaded' if llm_status else 'not_loaded'
+    }
     
     # Check FAISS status
     faiss_status = vector_db.index is not None
@@ -1878,10 +1740,14 @@ def enhanced_health_check():
     }
     
     return jsonify({
-        'status': 'healthy',
-        'ai_configured': bool(openai.api_key),
+        'status': 'healthy' if ollama_available else 'limited',
+        'ollama_available': ollama_available,
+        'ollama_host': OLLAMA_HOST,
+        'ai_configured': ollama_available and embedding_status and llm_status,
         'embedding_model': embedding_info,
         'embedding_status': embedding_status,
+        'llm_model': llm_info,
+        'llm_status': llm_status,
         'vector_db': {
             'type': 'faiss',
             'info': faiss_info,
@@ -1895,7 +1761,7 @@ def enhanced_health_check():
 # Additional endpoint for vector search testing
 @app.route('/api/vector/search', methods=['POST'])
 def test_vector_search():
-    """Test vector search with mxbai-embed-large"""
+    """Test vector search with Ollama embeddings"""
     data = request.get_json()
     query = data.get('query', '')
     k = data.get('k', 5)
@@ -1909,7 +1775,7 @@ def test_vector_search():
             'success': True,
             'query': query,
             'results': results,
-            'embedding_model': 'mxbai-embed-large',
+            'embedding_model': OLLAMA_EMBEDDING_MODEL,
             'vector_db': 'faiss'
         })
     except Exception as e:
@@ -1919,50 +1785,47 @@ def test_vector_search():
         }), 500
 
 if __name__ == '__main__':
-    print("🚀 Starting Enhanced AI-Powered Customer Revenue Leakage Detection System...")
-    print("🤖 Enhanced AI Stack:")
-    print("   📊 Embedding Model: mxbai-embed-large (1024 dimensions)")
+    print("🚀 Starting Ollama-Powered Customer Revenue Leakage Detection System...")
+    print("🤖 Ollama AI Stack:")
+    print(f"   🔗 Ollama Host: {OLLAMA_HOST}")
+    print(f"   📊 Embedding Model: {OLLAMA_EMBEDDING_MODEL}")
+    print(f"   🧠 LLM Model: {OLLAMA_LLM_MODEL}")
     print("   💾 Vector Database: FAISS with optimized indexing")
-    print("   🤖 LLM Integration: OpenAI GPT-3.5/4")
     print("   👥 Crew AI: Enhanced Customer-focused Multi-Agent System")
     print("   🔍 RAG Chatbot: Advanced context retrieval with customer insights")
     print("=" * 70)
     
-    # Initialize embedding model early
-    print("📥 Loading mxbai-embed-large embedding model...")
-    embedding_model = initialize_embedding_model()
-    if embedding_model:
-        print("✅ mxbai-embed-large model loaded successfully!")
+    # Initialize Ollama models
+    print("📥 Initializing Ollama models...")
+    ollama_success = initialize_ollama_models()
+    if ollama_success:
+        print("✅ Ollama models initialized successfully!")
     else:
-        print("⚠️  Warning: mxbai-embed-large model failed to load")
-    
-    # Check AI configuration
-    if not openai.api_key:
-        print("⚠️  WARNING: OpenAI API key not found!")
-        print("📝 Please copy .env.example to .env and add your API keys")
-        print("🔑 Required: OPENAI_API_KEY for LLM integration")
-    else:
-        print("✅ OpenAI API key configured")
+        print("⚠️  Warning: Ollama models failed to initialize")
+        print("📝 Please ensure:")
+        print("   1. Ollama is running: `ollama serve`")
+        print(f"   2. Install embedding model: `ollama pull {OLLAMA_EMBEDDING_MODEL}`")
+        print(f"   3. Install LLM model: `ollama pull {OLLAMA_LLM_MODEL}`")
     
     print("📊 Initializing enhanced customer database...")
     init_enhanced_db()
     print("✅ Enhanced database initialized successfully!")
     
     print("🌐 Starting Flask server on http://localhost:5000")
-    print("📝 Enhanced Customer AI API Endpoints:")
+    print("📝 Ollama Customer AI API Endpoints:")
     print("   - POST /api/auth/login")
     print("   - POST /api/datasets/upload [Customer data with enhanced preprocessing]")
-    print("   - POST /api/datasets/<id>/process [mxbai-embed-large + FAISS + Customer Crew AI]")
+    print("   - POST /api/datasets/<id>/process [Ollama embeddings + FAISS + Customer Crew AI]")
     print("   - GET  /api/leakages [Customer-focused leakages]")
     print("   - GET  /api/leakages/<id>/details [Enhanced customer context]")
-    print("   - POST /api/tickets/generate [Customer-impact tickets]")
+    print("   - POST /api/tickets/generate [Customer-impact tickets with Ollama AI]")
     print("   - GET  /api/tickets [Enhanced with customer context]")
-    print("   - POST /api/tickets/<id>/resolve [Customer-focused AI/Manual resolution]")
+    print("   - POST /api/tickets/<id>/resolve [Customer-focused Ollama AI/Manual resolution]")
     print("   - GET  /api/stats [Enhanced customer analytics]")
-    print("   - POST /api/chat [Enhanced RAG with mxbai-embed-large]")
+    print("   - POST /api/chat [Enhanced RAG with Ollama embeddings]")
     print("   - GET  /api/chat/history [Vector context history]")
-    print("   - POST /api/vector/search [Test mxbai embeddings]")
-    print("   - GET  /api/health [Enhanced AI stack status]")
+    print("   - POST /api/vector/search [Test Ollama embeddings]")
+    print("   - GET  /api/health [Enhanced Ollama AI stack status]")
     print("\n" + "="*70)
     
     app.run(debug=True, port=5000, host='0.0.0.0')

@@ -10,12 +10,12 @@ import sys
 # Add the current directory to Python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from app import app, init_db
+from app import app, init_enhanced_db  # Fixed: import correct function name
 
 if __name__ == '__main__':
     print("🚀 Starting Revenue Leakage Detection System Backend...")
     print("📊 Initializing database...")
-    init_db()
+    init_enhanced_db()  # Fixed: use correct function name
     print("✅ Database initialized successfully!")
     print("🌐 Starting Flask server on http://localhost:5000")
     print("📝 API Documentation:")

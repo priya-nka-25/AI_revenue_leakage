@@ -2,51 +2,45 @@
 Flask==2.3.3
 Flask-CORS==4.0.0
 Werkzeug==2.3.7
+MarkupSafe==2.1.3  # pin to avoid conflicts
 
 # AI and LLM Integration
-openai>=1.13.3
+openai==1.13.3
 google-generativeai==0.3.0
-crewai==0.175.0
-litellm>=1.74.9
+crewai==0.175.0 # safer, newer version avoids opentelemetry mess
+litellm==1.74.9
 
 # LangChain (minimal for text splitting only)
 langchain==0.1.0
-langchain-openai>=0.0.3
+langchain-openai==0.0.3
 langchain-community==0.0.10
 
-# Vector Database and Embeddings - Optimized for mxbai-embed-large
-sentence-transformers>=2.2.2
-faiss-cpu==1.7.4
-transformers>=4.30.0
+# Vector Database and Embeddings
+sentence-transformers==2.2.2
+faiss-cpu==1.8.0
+transformers==4.30.2
+chromadb==0.5.23
+mmh3==4.0.1  # force a stable version
 
-# Alternative Vector DBs (optional)
+# Alternative Vector DBs
 pinecone-client==2.2.4
 weaviate-client==3.25.3
-chromadb>=0.5.23
 
 # Data Processing and Analysis
 pandas==2.0.3
-numpy==1.24.3
+numpy==1.26.0
 scikit-learn==1.3.0
 
 # Utilities
 python-dotenv==1.0.0
-tiktoken>=0.7.0
+tiktoken==0.7.0
 
 # ML and NLP
-torch>=2.0.0
-nltk>=3.9
-sentencepiece>=0.2.0
+torch==2.0.1
+nltk==3.9
+sentencepiece==0.2.0
 
-# Additional dependencies for mxbai-embed-large
-accelerate>=0.20.0
-safetensors>=0.3.0
-
-# Database and Storage
-sqlite3
-
-# Optional: For advanced preprocessing
-spacy>=3.6.0
-
-# Optional: For better text processing
-regex>=2023.0.0
+# Extra
+accelerate==0.20.3
+safetensors==0.3.2
+regex==2023.6.3

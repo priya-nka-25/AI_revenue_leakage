@@ -1,9 +1,9 @@
 {
-  "name": "enhanced-revenue-leakage-detection",
+  "name": "ai-revenue-leakage-detection",
   "private": true,
-  "version": "2.0.0",
+  "version": "1.0.0",
   "type": "module",
-  "description": "Enhanced AI-Powered Customer Revenue Leakage Detection System with mxbai-embed-large",
+  "description": "AI-powered revenue leakage detection system with mxbai-embed-large",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
@@ -14,8 +14,7 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "axios": "^1.6.0",
-    "lucide-react": "^0.263.1",
-    "recharts": "^2.8.0"
+    "lucide-react": "^0.263.1"
   },
   "devDependencies": {
     "@types/react": "^18.2.15",
@@ -32,8 +31,15 @@
     "typescript": "^5.0.2",
     "vite": "^4.4.5"
   },
-  "engines": {
-    "node": ">=16.0.0",
-    "npm": ">=8.0.0"
-  }
+  "keywords": [
+    "ai",
+    "revenue-leakage",
+    "mxbai-embed-large",
+    "faiss",
+    "crew-ai",
+    "react",
+    "typescript"
+  ],
+  "author": "AI Revenue Detection Team",
+  "license": "MIT"
 }

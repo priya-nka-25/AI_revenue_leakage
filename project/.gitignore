@@ -23,3 +23,75 @@ dist-ssr
 *.sln
 *.sw?
 .env
+# Python cache & bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+env/
+*.env
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter
+.ipynb_checkpoints
+
+# Logs & temp
+*.log
+*.pot
+*.tmp
+*.swp
+*.swo
+
+# IDE / Editor
+.vscode/
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Cache
+.cache/
+.mypy_cache/
+.pytest_cache/
+.hypothesis/
+
+# Local data
+*.db
+*.sqlite3
+*.csv
+*.tsv
+
+# Model and vector store
+*.bin
+*.h5
+*.ckpt
+*.pt
+*.onnx
+*.pickle
+*.pkl
+faiss_index/
+
+# Ignore wheels
+*.whl
