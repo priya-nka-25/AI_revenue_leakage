@@ -1,13 +1,30 @@
-# Essential Only
+# Core Flask Dependencies
 Flask==2.3.3
 Flask-CORS==4.0.0
 Werkzeug==3.0.0
-crewai==0.175.0
-sentence-transformers==2.2.2
-faiss-cpu==1.8.0
+
+# Data Processing
 pandas==2.0.3
 numpy==1.26.0
+
+# Environment & Configuration
 python-dotenv==1.0.0
-requests==2.31.0            # For Ollama API calls
-ollama==0.1.7        # Ollama Python client
-yolov5       
+requests==2.31.0
+
+# AI Dependencies - Fixed Versions
+ollama==0.3.3
+sentence-transformers==2.2.2
+faiss-cpu==1.8.0
+
+# CrewAI - Simplified Version without conflicts
+langchain-community==0.0.38
+langchain-core==0.1.52
+langchain
+crewai-tools
+
+# Text Processing
+tiktoken==0.5.2
+openai==1.12.0
+
+# Optional: Remove if not needed
+# chromadb  # Commented out to avoid httpx conflicts

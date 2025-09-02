@@ -40,7 +40,6 @@ export interface Leakage {
   department: string;
   customer_impact: string;
   sector_specific: string;
-  embedding_score: number;
   detected_at: string;
 }
 
