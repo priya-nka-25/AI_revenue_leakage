@@ -175,3 +175,17 @@ The system simulates a complete AI pipeline:
 - Responsive design for mobile and desktop
 - Real-time data updates and synchronization
 - Professional UI/UX suitable for enterprise use
+
+
+
+Option 1: One Command (Recommended)
+bashpython run_project.py
+Option 2: Manual Setup
+bash# Terminal 1 - Backend
+cd backend
+pip install -r requirements.txt
+python run.py
+
+# Terminal 2 - Frontend (from project root)
+npm install
+npm run dev
