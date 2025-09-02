@@ -7,7 +7,7 @@ const api = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 45000, // Increased timeout for mxbai-embed-large processing
+  timeout: 30000, // Increased timeout for mxbai-embed-large processing
 });
 
 // Add response interceptor for error handling
